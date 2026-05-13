@@ -1,0 +1,2 @@
+com\example\keycloak\auth\GlobalSessionLimiter.class
+com\example\keycloak\auth\GlobalSessionLimiterFactory.class
