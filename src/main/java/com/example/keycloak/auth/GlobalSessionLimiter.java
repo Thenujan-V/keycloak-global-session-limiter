@@ -57,11 +57,8 @@ public class GlobalSessionLimiter implements Authenticator {
                     "GlobalSessionLimiter: BLOCKING login — realm='%s' has %d active sessions (limit=%d).",
                     realm.getName(), activeSessionCount, maxSessions
                 );
-                Response challenge = context.form()
-                        .setAttribute("login", new java.util.HashMap<String, Object>())
-                        .setError(MSG_SESSION_LIMIT_REACHED)
-                        .createForm("login.ftl");
-                context.forceChallenge(challenge);
+
+                context.forceChallenge(buildLimitChallenge(context));
                 return;
             }
 
@@ -82,34 +79,22 @@ public class GlobalSessionLimiter implements Authenticator {
     }
 
     /**
-     * Counts active user sessions in the realm.
+     * Counts active user sessions in the realm via per-client session stats.
      *
-     * Primary: getActiveUserSessions(realm, null) — supported by the Infinispan-backed
-     * UserSessionProvider in Keycloak 18. When client is null the provider returns the
-     * total USER_SESSION cache entry count for the realm.
-     *
-     * Fallback: if the primary call is unsupported (e.g., JPA provider throws on null
-     * client), sums active client session counts from getActiveClientSessionStats().
-     * Note: the fallback may overcount users who have sessions with multiple clients.
+     * Uses getActiveClientSessionStats() which is supported by all UserSessionProvider
+     * implementations (Infinispan and JPA). The sum of per-client counts may overcount
+     * users who hold sessions with multiple clients, but is intentionally conservative
+     * for a session limiter.
      */
     private long countActiveSessions(AuthenticationFlowContext context, RealmModel realm) {
-        try {
-            // Primary path: realm-wide unique user session count (Infinispan-backed)
-            return context.getSession().sessions().getActiveUserSessions(realm, null);
-        } catch (NullPointerException | UnsupportedOperationException primaryEx) {
-            LOG.warnf(
-                "GlobalSessionLimiter: getActiveUserSessions(realm, null) is not supported " +
-                "by this UserSessionProvider. Falling back to client session stats. " +
-                "Realm: '%s'. Cause: %s",
-                realm.getName(), primaryEx.getMessage()
-            );
-            // Fallback: sum per-client active session counts
-            Map<String, Long> stats =
-                context.getSession().sessions().getActiveClientSessionStats(realm, false);
-            return stats.values().stream()
-                    .mapToLong(Long::longValue)
-                    .sum();
+        Map<String, Long> stats =
+            context.getSession().sessions().getActiveClientSessionStats(realm, false);
+        if (stats == null || stats.isEmpty()) {
+            return 0L;
         }
+        return stats.values().stream()
+                .mapToLong(Long::longValue)
+                .sum();
     }
 
     /**
@@ -148,11 +133,37 @@ public class GlobalSessionLimiter implements Authenticator {
     }
 
     /**
-     * No form POST is needed — the limiter either succeeds or renders an error page.
+     * Handles form submission from the session-limit challenge page.
+     *
+     * Re-runs the session count check: if still over limit, re-renders the blocked page;
+     * otherwise allows the flow to continue (handles the rare race where a session ended
+     * between the initial challenge and the form submit).
      */
     @Override
     public void action(AuthenticationFlowContext context) {
-        // intentional no-op
+        RealmModel realm = context.getRealm();
+        int maxSessions = resolveMaxSessions(context);
+        try {
+            long activeSessionCount = countActiveSessions(context, realm);
+            if (activeSessionCount >= maxSessions) {
+                context.forceChallenge(buildLimitChallenge(context));
+                return;
+            }
+        } catch (Exception e) {
+            LOG.errorf(e,
+                "GlobalSessionLimiter: Failed to count active sessions in realm '%s' during action. " +
+                "Allowing login to proceed (fail-open).",
+                realm.getName()
+            );
+        }
+        context.success();
+    }
+
+    private Response buildLimitChallenge(AuthenticationFlowContext context) {
+        return context.form()
+                .setAttribute("login", new java.util.HashMap<String, Object>())
+                .setError(MSG_SESSION_LIMIT_REACHED)
+                .createForm("login.ftl");
     }
 
     /**
