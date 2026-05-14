@@ -57,10 +57,11 @@ public class GlobalSessionLimiter implements Authenticator {
                     "GlobalSessionLimiter: BLOCKING login — realm='%s' has %d active sessions (limit=%d).",
                     realm.getName(), activeSessionCount, maxSessions
                 );
-                Response errorPage = context.form()
+                Response challenge = context.form()
+                        .setAttribute("login", new java.util.HashMap<String, Object>())
                         .setError(MSG_SESSION_LIMIT_REACHED)
-                        .createErrorPage(Response.Status.TOO_MANY_REQUESTS);
-                context.failure(AuthenticationFlowError.GENERIC_AUTHENTICATION_ERROR, errorPage);
+                        .createForm("login.ftl");
+                context.forceChallenge(challenge);
                 return;
             }
 
